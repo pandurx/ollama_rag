@@ -1,6 +1,7 @@
 
 from langchain_experimental.text_splitter import SemanticChunker
-from langchain.embeddings import HuggingFaceEmbeddings
+# from langchain.embeddings import HuggingFaceEmbeddings # deprecated, replace with langchain_community
+from langchain_community.embeddings import HuggingFaceEmbeddings
 from langchain_community.embeddings import HuggingFaceEmbeddings
 from langchain_community.vectorstores import FAISS
 from langchain_community.llms import Ollama
@@ -10,16 +11,12 @@ from langchain.chains.combine_documents.stuff import StuffDocumentsChain
 from langchain.prompts import PromptTemplate
 from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_community.document_loaders import DirectoryLoader, UnstructuredXMLLoader
+from langchain_text_splitters import RecursiveCharacterTextSplitter
+import os
 
-# docs = [
-#   "Llamas are members of the camelid family meaning they're pretty closely related to vicuñas and camels",
-#   "Llamas were first domesticated and used as pack animals 4,000 to 5,000 years ago in the Peruvian highlands",
-#   "Llamas can grow as much as 6 feet tall though the average llama between 5 feet 6 inches and 5 feet 9 inches tall",
-#   "Llamas weigh between 280 and 450 pounds and can carry 25 to 30 percent of their body weight",
-#   "Llamas are vegetarians and have very efficient digestive systems",
-#   "Llamas live to be about 20 years old, though some only live for 15 years and others live to be 30 years old",
-# ]
-
+# load the xml documents
+print("load xml documents")
+##############################################
 path_to_xml = "laws-lois-xml/eng/acts/"
 loader = DirectoryLoader(
     path_to_xml, 
@@ -30,75 +27,102 @@ loader = DirectoryLoader(
     loader_kwargs={"mode":"elements"}
 )
 
-# creating...
-# docs = loader.load()
+# vector store path
+vectorStorePath = '/mnt/Linux/vector'
+vectorStoreFiles = os.listdir(vectorStorePath)
 
-# text_splitter = SemanticChunker(HuggingFaceEmbeddings())
-# documents = text_splitter.split_documents(docs)
-
-# print("Number of chunks created: ", len(documents))
-
-# Instantiate the embedding model
+# define embedder
+#   HuggingFaceEmbeddings vs GPT4AllEmbeddings
 embedder = HuggingFaceEmbeddings()
 
-# Create the vector store 
-# vector = FAISS.from_documents(documents, embedder)
-# vector.save_local(folder_path=f'/mnt/Linux/vector2')
+# embeddings = GPT4AllEmbeddings(
+#     model_name="all-MiniLM-L6-v2.gguf2.f16.gguf",
+#     gpt4all_kwargs={'allow_download': 'True'}
+# )
 
-# Load the vector store
-vector = FAISS.load_local(
-    '/mnt/Linux/vector2', 
-    embedder, 
-    allow_dangerous_deserialization=True
-)
+# if vectorStore is empty then we need to create the store
+if len (vectorStoreFiles) == 0:
+    # split documents then create the embedding
+    print("create vector store")
+    ##############################################
+    docs = loader.load()
 
-# Retrieval from vector database
+    # split the texts into chunks
+    ##############################################
+    # reference: https://medium.com/the-ai-forum/semantic-chunking-for-rag-f4733025d5f5
+    # RecursiveCharacterTextSplitter vs SemanticChunker
+
+    text_splitter = SemanticChunker(embedder) 
+    # statistics using SemanticChunker:
+    #   considers relationships within text, provides accurate outcome but slower strategy
+    #   number of chunks created: 22370
+
+    # text_splitter = RecursiveCharacterTextSplitter(
+    #     chunk_size=1000,
+    #     chunk_overlap=200,
+    #     length_function=len,
+    #     is_separator_regex=False
+    # )
+    # statistics using RecursiveCharacterTextSplitter:
+    #   recursively divides text into smaller chunks in hierarchy using separators
+    #   number of chunks created: 21172
+
+    documents = text_splitter.split_documents(docs)
+    print("Number of chunks created: ", len(documents))
+
+    # Create the vector store 
+    vector = FAISS.from_documents(documents, embedder)
+    vector.save_local(folder_path=f"{vectorStorePath}")
+
+# otherwise use existing vectorStore
+else: 
+    # Load the vector store
+    print("load vector store")
+    ##############################################
+    vector = FAISS.load_local(
+        vectorStorePath, 
+        embedder, 
+        allow_dangerous_deserialization=True
+    )
+
+# Retrieval from vector store
+print("retrieve from vector store")
+##############################################
 retriever = vector.as_retriever(search_type="similarity", search_kwargs={"k": 3})
 retrieved_docs = retriever.invoke("What animals are llamas related to?")
 
+print("define model and call ollama")
+# model = ollama2
 llm = Ollama(model="mistral", base_url="http://192.168.2.27:11434")
 
-# prompt = """
-# 1. Answer the following question based only on the provided context.
-# 2. Include references to the context that explains your answer.  Describe the steps you took to arrive at your answer
-# 3. If you don't know the answer, just say that "I don't know" but don't make up an answer on your own.\n
-# 4. Keep the answer crisp and limited to 3,4 sentences.
-
-# Context: {context}
-
-# Question: {question}
-
-# Helpful Answer:"""
-
-QA_CHAIN_PROMPT = PromptTemplate.from_template("""
-    Answer the following question based only on the provided context.  
-    Answer in full paragraphs. 
-    Ensure to list out amendments to acts and regulations to provided more information. 
-    Include references to the context that explains your answer.
-    Describe the steps you took to arrive at your answer. If you don't know the answer, just say that you don't know.
+# define prompt
+print("define prompt")
+##############################################
+chainPrompt = PromptTemplate.from_template('''
+Answer the question with the provided context. 
+Answer in full paragraphs. 
+Ensure to list out amendments to acts and regulations to provided more information. 
+Include references to the context that explains your answer.
+If you don't know the answer, just say that you don't know.
+If the question does not relate to provided context, just say question is unrelated and do not provide the answer, instructions, or guidelines.
+                                               
     Question: {question} 
+                                               
     Context: {context} 
-    Answer:"""
+                                               
+    Answer: '''
 )
-
-
-# QA_CHAIN_PROMPT = PromptTemplate.from_template(prompt) 
 
 llm_chain = LLMChain(
     llm=llm, 
-    prompt=QA_CHAIN_PROMPT, 
+    prompt=chainPrompt, 
     callbacks=None, 
     verbose=True
 )
 
-# document_prompt = PromptTemplate(
-#     input_variables=["page_content", "source"],
-#     template="Context:\ncontent:{page_content}\nsource:{source}"
-# )
-
 document_prompt = PromptTemplate(
-    input_variables=["page_content"],
-    template="Context:\ncontent:{page_content}"
+    input_variables=["page_content", "source"],
+    template="Context:\ncontent:{page_content}\nsource:{source}"
 )
 
 combine_documents_chain = StuffDocumentsChain(
@@ -115,4 +139,5 @@ qa = RetrievalQA(
                   return_source_documents=True
               )
 
-print(qa("How do cows eat?")["result"])
+print("retrieve answer to a provided question")
+print(qa("how do i turn on my computer?")["result"])
